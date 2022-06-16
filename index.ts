@@ -1,5 +1,6 @@
 import WebSocket, { WebSocketServer } from "ws";
 import { v4 } from "uuid";
+import express from "express";
 import names from "./names.json";
 import adjectives from "./adjectives.json";
 import questions from "./questions";
@@ -10,6 +11,29 @@ type Options = {
   criteria?: number;
   prefix?: string;
 };
+
+interface Player {
+  clientId: string;
+  name: string;
+  score: number;
+}
+
+const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+
+function capitalizeFirstLetter(str: string) {
+  const capitalized = str.charAt(0).toUpperCase() + str.slice(1);
+  return capitalized;
+}
+
+function randomName() {
+  const name = `${names[Math.floor(Math.random() * names.length)]}`;
+  const adjective = `${
+    adjectives[Math.floor(Math.random() * adjectives.length)]
+  }`;
+  return `${capitalizeFirstLetter(adjective)}${capitalizeFirstLetter(
+    name
+  )}${Math.floor(Math.random() * 20)}`;
+}
 
 function generateGameCode() {
   let result = "";
@@ -30,7 +54,6 @@ function shuffle(arr: any[]) {
   }
   return shuffled;
 }
-
 function findSimilar(
   word: string,
   candidates: readonly string[] | string[],
@@ -58,52 +81,16 @@ function findSimilar(
   return matches;
 }
 
-const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
-
-const clients: { [clientId: string]: any } = {};
-const games: {
-  [gameId: string]: {
-    id: string;
-    players: string[];
-    question: string | null;
-    currentRound: {
-      roundNumber: number;
-      roundScores: {
-        [playerId: string]: number;
-      };
-    };
-    creator: {
-      id: string;
-      name: string;
-    };
-    started: boolean;
-  };
-} = {};
-const guesses: { [gameId: string]: string[] } = {};
-
 function sendToGamePlayers(game, data, playersFilter = (e) => e) {
-  const gamePlayers = game.players
-    .map((playerId) =>
-      Object({
-        clientId: playerId,
-        name: Object.values(clients).find((cl) => cl.clientId === playerId)
-          ?.name,
-      })
-    )
-    .filter(playersFilter);
-
   for (let index = 0; index < game.players.length; index++) {
     const player = Object.values(clients).find(
-      (cl) => cl.clientId === game.players[index]
+      (cl) => cl.clientId === game.players[index].clientId
     );
 
     player?.connection?.send?.(
       JSON.stringify({
         ...data,
-        game: {
-          ...game,
-          players: gamePlayers,
-        },
+        game,
       })
     );
   }
@@ -129,37 +116,69 @@ async function sendQuestion(
 
     sendToGamePlayers(game, {
       method: "question end",
-      score: 15,
       timeUntilNextQuestion,
     });
+
     game.question = null;
     resolve(null);
   });
 }
 
-const wss = new WebSocketServer({ port: 9090 }, () =>
+const clients: { [clientId: string]: any } = {};
+const games: {
+  [gameId: string]: {
+    id: string;
+    code: string;
+    players: Player[];
+    question: string | null;
+    currentRound: {
+      roundNumber: number;
+      roundScores: {
+        [playerId: string]: number;
+      };
+    };
+    creator: {
+      id: string;
+      name: string;
+    };
+    started: boolean;
+  };
+} = {};
+const gameCodes: { [code: string]: string } = {};
+const guesses: { [gameId: string]: string[] } = {};
+
+const app = express();
+const server = app.listen(9090, () =>
   console.log("Server started at port 9090")
 );
 
-function capitalizeFirstLetter(str: string) {
-  const capitalized = str.charAt(0).toUpperCase() + str.slice(1);
-  return capitalized;
-}
+app.get("/", (req, res) => {
+  res.send("websocket is running");
+});
 
-function randomName() {
-  const name = `${names[Math.floor(Math.random() * names.length)]}`;
-  const adjective = `${
-    adjectives[Math.floor(Math.random() * adjectives.length)]
-  }`;
-  return `${capitalizeFirstLetter(adjective)}${capitalizeFirstLetter(
-    name
-  )}${Math.floor(Math.random() * 20)}`;
-}
+app.get("/code/:code", (req, res) => {
+  const gameId = gameCodes[req.params.code];
+  if (!gameId)
+    return res.json({
+      status: 404,
+      message: "Game code not found",
+    });
+
+  res.json({
+    status: 200,
+    gameId,
+  });
+});
+
+const wss = new WebSocketServer({ noServer: true });
+
+server.on("upgrade", (request, socket, head) => {
+  wss.handleUpgrade(request, socket, head, (socket) => {
+    wss.emit("connection", socket, request);
+  });
+});
 
 wss.on("connection", (ws: WebSocket, req) => {
-  // const gameId = req.url?.split("/").at(-1);
-  // if (!gameId || !games[gameId])
-  //   return ws.send(JSON.stringify({ error: "Game not found" }));
   const url = new URL(`https://web.socket/${req.url}`);
   const clientId = v4();
   const token = v4();
@@ -203,9 +222,17 @@ wss.on("connection", (ws: WebSocket, req) => {
       const client = clients[token];
       const clientId = client.clientId;
       const gameId = v4();
+      const gameCode = generateGameCode();
       games[gameId] = {
         id: gameId,
-        players: [clientId],
+        code: gameCode,
+        players: [
+          {
+            clientId,
+            name: client.name,
+            score: 0,
+          },
+        ],
         question: null,
         currentRound: {
           roundNumber: 0,
@@ -218,15 +245,15 @@ wss.on("connection", (ws: WebSocket, req) => {
         started: false,
       };
 
+      gameCodes[gameCode] = gameId;
+
       const connection = clients[token]?.connection;
       clients[token].currentGame = gameId;
+
       connection.send(
         JSON.stringify({
           method: "create",
-          game: {
-            ...games[gameId],
-            players: [{ clientId, name: clients[token]?.name }],
-          },
+          game: games[gameId],
         })
       );
     }
@@ -249,24 +276,36 @@ wss.on("connection", (ws: WebSocket, req) => {
         );
 
       game.started = true;
+
       sendToGamePlayers(game, {
         method: "start",
       });
 
-      const randomizedQuestions = shuffle(questions);
+      const randomizedQuestions = [...shuffle(questions)].splice(0, 10);
 
       for (
         let index = 0;
         index < Math.min(randomizedQuestions.length, 10);
         index++
       ) {
+        const isLast = index === randomizedQuestions.length - 1;
         const question = randomizedQuestions[index];
 
         await sendQuestion(game, question, 30000, 10000);
-        if (index === randomizedQuestions.length - 1) {
+        if (isLast) {
           sendToGamePlayers(game, {
             method: "end",
+            game,
           });
+          for (let index = 0; index < game.players.length; index++) {
+            const player = game.players[index];
+            if (!player) continue;
+            const client = clients[player.clientId];
+            if (!client) continue;
+            client.currentGame = null;
+          }
+          delete games[gameId];
+          delete gameCodes[game.code];
 
           break;
         }
@@ -274,9 +313,24 @@ wss.on("connection", (ws: WebSocket, req) => {
       }
     }
 
+    if (data.method === "join code") {
+      const token = data.token;
+      const gameId = gameCodes[data.code];
+
+      ws.emit(
+        "message",
+        JSON.stringify({
+          method: "join",
+          token,
+          gameId,
+        })
+      );
+    }
+
     if (data.method === "join") {
       const token = data.token;
       const client = clients[token];
+      if (!client) return;
       const clientId = client.clientId;
       const gameId = data.gameId;
       const game = games[gameId];
@@ -301,29 +355,29 @@ wss.on("connection", (ws: WebSocket, req) => {
         );
 
       if (type === "join") {
-        game.players.push(clientId);
+        game.players.push({
+          clientId,
+          name: client.name,
+          score: 0,
+        });
+
         clients[token].currentGame = gameId;
       } else {
-        game.players = game.players.filter((player) => player !== clientId);
+        game.players = game.players.filter(
+          (player) => player.clientId !== clientId
+        );
         clients[token].currentGame = null;
       }
-      const gamePlayers = game.players.map((playerId) =>
-        Object({
-          clientId: playerId,
-          name: Object.values(clients).find((cl) => cl.clientId === playerId)
-            ?.name,
-        })
-      );
 
       for (let index = 0; index < game.players.length; index++) {
         const player = game.players[index];
-        //@ts-ignore
+
         Object.values(clients)
-          .find((cl) => cl.clientId === player)
+          .find((cl) => cl.clientId === player.clientId)
           .connection.send(
             JSON.stringify({
               method: "join",
-              game: { ...games[gameId], players: gamePlayers },
+              game: games[gameId],
             })
           );
       }
@@ -369,6 +423,10 @@ wss.on("connection", (ws: WebSocket, req) => {
 
       if (correct) {
         guesses[gameId] = [similar[0], ...(guesses?.[gameId] || [])];
+        game.players.find(
+          (player) => player.clientId === client.clientId
+        ).score += 25;
+
         if (!game.currentRound.roundScores[client.clientId]) {
           game.currentRound.roundScores[client.clientId] = 1;
         } else {
@@ -378,7 +436,7 @@ wss.on("connection", (ws: WebSocket, req) => {
 
       for (let index = 0; index < game.players.length; index++) {
         const player = Object.values(clients).find(
-          (cl) => cl.clientId === game.players[index]
+          (cl) => cl.clientId === game.players[index].clientId
         );
 
         player?.connection?.send?.(
@@ -388,6 +446,7 @@ wss.on("connection", (ws: WebSocket, req) => {
               id: client.clientId,
               name: client.name,
             },
+            game,
             content: correct ? similar[0] : content,
             correct,
           })
