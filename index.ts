@@ -5,6 +5,7 @@ import names from "./names.json";
 import adjectives from "./adjectives.json";
 import questions from "./questions";
 import leven from "./leven";
+import cors from "cors";
 
 type Options = {
   maxScore?: number;
@@ -25,13 +26,19 @@ function capitalizeFirstLetter(str: string) {
   return capitalized;
 }
 
+function camelCase(string: string) {
+  return string.replace(/-([a-z])/gi, function (_, letter) {
+    return letter.toUpperCase();
+  });
+}
+
 function randomName() {
   const name = `${names[Math.floor(Math.random() * names.length)]}`;
   const adjective = `${
     adjectives[Math.floor(Math.random() * adjectives.length)]
   }`;
-  return `${capitalizeFirstLetter(adjective)}${capitalizeFirstLetter(
-    name
+  return `${capitalizeFirstLetter(camelCase(adjective))}${capitalizeFirstLetter(
+    camelCase(name)
   )}${Math.floor(Math.random() * 20)}`;
 }
 
@@ -82,6 +89,7 @@ function findSimilar(
 }
 
 function sendToGamePlayers(game, data, playersFilter = (e) => e) {
+  if (!game || !game?.players) return;
   for (let index = 0; index < game.players.length; index++) {
     const player = Object.values(clients).find(
       (cl) => cl.clientId === game.players[index].clientId
@@ -152,6 +160,8 @@ const server = app.listen(9090, () =>
   console.log("Server started at port 9090")
 );
 
+app.use(cors());
+
 app.get("/", (req, res) => {
   res.send("websocket is running");
 });
@@ -167,6 +177,20 @@ app.get("/code/:code", (req, res) => {
   res.json({
     status: 200,
     gameId,
+  });
+});
+
+app.get("/clients/:token", (req, res) => {
+  const client = clients[req.params.token];
+  if (!client)
+    return res.json({
+      status: 404,
+      message: "Client not found",
+    });
+
+  res.json({
+    status: 200,
+    client,
   });
 });
 
@@ -202,6 +226,8 @@ wss.on("connection", (ws: WebSocket, req) => {
   });
 
   ws.on("close", () => {
+    console.log("close");
+
     if (!clients[token]?.currentGame) return delete clients[token];
     sendToGamePlayers(
       games[clients[token].currentGame],
@@ -366,6 +392,7 @@ wss.on("connection", (ws: WebSocket, req) => {
         game.players = game.players.filter(
           (player) => player.clientId !== clientId
         );
+        if (!clients[token]) return;
         clients[token].currentGame = null;
       }
 
@@ -374,7 +401,7 @@ wss.on("connection", (ws: WebSocket, req) => {
 
         Object.values(clients)
           .find((cl) => cl.clientId === player.clientId)
-          .connection.send(
+          ?.connection.send(
             JSON.stringify({
               method: "join",
               game: games[gameId],
@@ -387,7 +414,7 @@ wss.on("connection", (ws: WebSocket, req) => {
       const token = data?.token;
       const client = clients[token];
       if (!client) return;
-      const connection = client.connection;
+      const connection = client?.connection;
       const gameId = data.gameId;
       const game = games[gameId];
       let similar;

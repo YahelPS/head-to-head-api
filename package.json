@@ -12,6 +12,8 @@
   "dependencies": {
     "@types/node": "^17.0.41",
     "@types/uuid": "^8.3.4",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.1",
     "express": "^4.18.1",
     "express-ws": "^5.0.2",
     "leven": "^4.0.0",
